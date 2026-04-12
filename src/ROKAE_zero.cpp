@@ -1,7 +1,8 @@
-/*该代码用来输入一组关节角度，看机器人是否能够运行到指定的位姿（非实时模式）*/
+/*该代码用于回到机器人零位*/
 #include <iostream>
 #include <thread>
 #include <chrono>
+#include <cmath>
 #include "rokae/robot.h"
 
 using namespace rokae;
@@ -40,11 +41,11 @@ int main()
         // ========= 给定目标关节角度 ===========
         rokae::MoveJCommand move_q({
             0.0,
-            M_PI / 6.0,
             0.0,
-            M_PI / 3.0,
             0.0,
-            M_PI / 2.0
+            0.0,
+            0.0,
+            0.0
         });
 
         // ================= 运动执行 =================
@@ -52,18 +53,29 @@ int main()
         std::cout << "已发送关节运动指令，机器人开始运动..." << std::endl;
 
         // 等待机器人运动到指定位置
-        while(true)
+        while (true)
         {
             // 防止占满CPU，每次查询后sleep
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
             auto state = robot.operationState(ec);
-            if(state == rokae::OperationState::idle)
+
+            if (state == rokae::OperationState::idle)
             {
-                std::cout << "机器人已到达目标关节位置" << std::endl;
+                std::cout << "机器人已停止运动" << std::endl;
                 break;
             }
         }
+
+        // 读回当前关节角，确认是否接近零位
+        auto q_now = robot.jointPos(ec);
+        std::cout << "当前关节角(rad): ";
+        for (double q : q_now)
+        {
+            std::cout << q << " ";
+        }
+        std::cout << std::endl;
+
         // 机器人下电
         robot.setPowerState(false, ec);
     }
