@@ -1,76 +1,117 @@
-/*该代码用来输入一组关节角度，看机器人是否能够运行到指定的位姿（非实时模式）*/
 #include <iostream>
 #include <thread>
 #include <chrono>
+#include <system_error>
 #include "rokae/robot.h"
 
 using namespace rokae;
 
+static bool checkEc(const std::string& step, const std::error_code& ec)
+{
+    if (ec)
+    {
+        std::cerr << "[失败] " << step
+                  << " | code = " << ec.value()
+                  << " | msg = " << ec.message() << std::endl;
+        return false;
+    }
+    std::cout << "[成功] " << step << std::endl;
+    return true;
+}
+
 int main()
 {
-    try{
-        // ======================机器人连接配置==================
-        std::string ip = "192.168.21.10";
-        std::string local_ip = "192.168.21.150";
-        // 错误码
-        std::error_code ec;   
-        rokae::xMateRobot robot(ip,local_ip);
-        std::cout<<"机器人连接成功"<<std::endl;
+    try
+    {
+        std::string ip = "192.168.2.160";
+        std::error_code ec;
 
-        // 设置机器人操作模式为自动模式
-        robot.setOperateMode(rokae::OperateMode::automatic,ec);
+        rokae::xMateRobot robot(ip);
+        std::cout << "机器人连接成功" << std::endl;
 
-        // 机器人上电
-        robot.setPowerState(true,ec);
+        ec.clear();
+        robot.setOperateMode(rokae::OperateMode::automatic, ec);
+        if (!checkEc("切换自动模式", ec)) return -1;
 
-        // 设置运动控制模式为非实时运动模式
-        robot.setMotionControlMode(MotionControlMode::NrtCommand, ec);
+        ec.clear();
+        robot.setPowerState(true, ec);
+        if (!checkEc("机器人上电", ec)) return -1;
 
-        // 发送指令之前清除缓存
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+        ec.clear();
+        robot.setMotionControlMode(rokae::MotionControlMode::NrtCommand, ec);
+        if (!checkEc("切换非实时模式", ec)) return -1;
+
+        ec.clear();
         robot.moveReset(ec);
+        if (!checkEc("moveReset", ec)) return -1;
 
-        // 选择到达指定关节角度的速度(50%)
-        robot.setDefaultSpeed(500,ec);
+        ec.clear();
+        robot.setDefaultSpeed(200, ec);
+        if (!checkEc("设置默认速度", ec)) return -1;
 
-        // 选择默认转弯区
-        // 转弯区：机器人在到达某个目标点附近时，
-        // 允不允许“不完全停准这个点”，而是提前拐过去继续走下一个点的容差范围。
-        robot.setDefaultZone(0,ec);
+        ec.clear();
+        robot.setDefaultZone(0, ec);
+        if (!checkEc("设置默认转弯区", ec)) return -1;
 
-        // ========= 给定目标关节角度 ===========
-        rokae::MoveJCommand move_q({
+        // 这里必须用 MoveAbsJCommand
+        rokae::MoveAbsJCommand move_q({
             0.0,
-            M_PI / 6.0,
+            M_PI / 3.0,
             0.0,
             M_PI / 3.0,
             0.0,
             M_PI / 2.0
         });
 
-        // ================= 运动执行 =================
-        robot.executeCommand({move_q},ec);
-        std::cout << "已发送关节运动指令，机器人开始运动..." << std::endl;
+        ec.clear();
+        robot.executeCommand({move_q}, ec);
+        if (!checkEc("发送 MoveAbsJ 指令", ec)) return -1;
 
-        // 等待机器人运动到指定位置
-        while(true)
+        std::cout << "已发送关节运动指令" << std::endl;
+
+        bool started = false;
+        auto t0 = std::chrono::steady_clock::now();
+
+        while (true)
         {
-            // 防止占满CPU，每次查询后sleep
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
+            ec.clear();
             auto state = robot.operationState(ec);
-            if(state == rokae::OperationState::idle)
+            if (!checkEc("查询 operationState", ec)) return -1;
+
+            if (state == rokae::OperationState::moving ||
+                state == rokae::OperationState::jogging)
             {
-                std::cout << "机器人已到达目标关节位置" << std::endl;
+                started = true;
+            }
+
+            if (started && state == rokae::OperationState::idle)
+            {
+                std::cout << "机器人已到达目标位置" << std::endl;
                 break;
             }
+
+            if (!started &&
+                std::chrono::steady_clock::now() - t0 > std::chrono::seconds(5))
+            {
+                std::cerr << "5秒内未进入 moving，说明控制器未真正开始执行该指令。" << std::endl;
+                break;
+            }
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
-        // 机器人下电
-        robot.setPowerState(false, ec);
+
+        // 调试时先不要自动下电
+        // ec.clear();
+        // robot.setPowerState(false, ec);
+        // checkEc("机器人下电", ec);
     }
     catch (const std::exception& e)
     {
-        std::cerr<<"连接失败"<<e.what()<<std::endl;
+        std::cerr << "异常: " << e.what() << std::endl;
         return -1;
     }
+
     return 0;
 }

@@ -138,10 +138,10 @@ void writeLogTxt(const std::string& filename, const std::vector<LogRow>& logs)
 int main()
 {
     //================== 输入参数 ==================
-    const std::string robot_ip   = "192.168.21.10";
-    const std::string local_ip   = "192.168.21.150";
+    std::string robot_ip = "192.168.2.160";
+    std::string local_ip = "192.168.2.2";
     const std::string input_q    = "../data_in/q.txt";
-    const std::string output_txt = "../data_out/rt_torque_log.txt";
+    const std::string output_txt = "../data_out/rt_torque_log4.txt";
 
     std::error_code ec;
     rokae::xMateRobot SDU_SR4;
@@ -176,13 +176,13 @@ int main()
             return -1;
         }
 
-        // 5) 网络实时容差
-        SDU_SR4.setRtNetworkTolerance(20, ec);
-        if (ec)
-        {
-            std::cerr << "setRtNetworkTolerance失败: " << ec.message() << std::endl;
-            return -1;
-        }
+        // // 5) 网络实时容差
+        // SDU_SR4.setRtNetworkTolerance(20, ec);
+        // if (ec)
+        // {
+        //     std::cerr << "setRtNetworkTolerance失败: " << ec.message() << std::endl;
+        //     return -1;
+        // }
 
         // 6) 上电
         SDU_SR4.setPowerState(true, ec);
@@ -222,17 +222,20 @@ int main()
             return -1;
         }
 
-        // 10) MoveJ 到零位
-        std::cout << "MoveJ到机器人零位..." << std::endl;
-        std::array<double, 6> q_zero = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
-        rtCon->MoveJ(0.2, q_current, q_zero);
+        // // 10) MoveJ 到零位
+        // std::cout << "MoveJ到机器人零位..." << std::endl;
+        // std::array<double, 6> q_zero = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+        // rtCon->MoveJ(0.2, q_current, q_zero);
 
-        // 11) MoveJ 到轨迹起点
+        // // 11) MoveJ 到轨迹起点
+        // std::cout << "MoveJ到轨迹起点..." << std::endl;
+        // rtCon->MoveJ(0.2, q_zero, traj.front());
+
         std::cout << "MoveJ到轨迹起点..." << std::endl;
-        rtCon->MoveJ(0.2, q_zero, traj.front());
+        rtCon->MoveJ(0.2, q_current, traj.front());
 
         // 稳定一下
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
         // 12) 轨迹索引
         std::size_t index = 0;

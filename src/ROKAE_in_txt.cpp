@@ -64,8 +64,8 @@ std::vector<std::array<double, 6>> readJointTxt(const std::string& filename)
 int main()
 {
     //==================输入参数
-    const std::string robot_ip = "192.168.21.10";
-    const std::string local_ip = "192.168.21.150";
+    std::string robot_ip = "192.168.2.160";
+    std::string local_ip = "192.168.2.2";
     const std::string input_q = "../data_in/q.txt";
 
     //
@@ -123,9 +123,9 @@ int main()
         }
 
         // 移动到零点
-        std::cout << "MoveJ到机器人零位" << std::endl;
-        std::array<double, 6> q_target = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
-        rtCon->MoveJ(0.2, q_current,q_target);
+        // std::cout << "MoveJ到机器人零位" << std::endl;
+        // std::array<double, 6> q_target = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+        // rtCon->MoveJ(0.2, q_current,q_target);
 
         std::cout << "MoveJ到轨迹起点..." << std::endl;
         rtCon->MoveJ(0.2, q_current, traj.front());

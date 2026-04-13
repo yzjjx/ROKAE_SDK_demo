@@ -11,8 +11,8 @@ int main()
 {
     try{
         // ======================机器人连接配置==================
-        std::string ip = "192.168.21.10";
-        std::string local_ip = "192.168.21.150";
+        std::string ip = "192.168.2.160";
+        std::string local_ip = "192.168.2.2";
         // 错误码
         std::error_code ec;   
         rokae::xMateRobot robot(ip,local_ip);
@@ -55,9 +55,6 @@ int main()
         // 等待机器人运动到指定位置
         while (true)
         {
-            // 防止占满CPU，每次查询后sleep
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
             auto state = robot.operationState(ec);
 
             if (state == rokae::OperationState::idle)
