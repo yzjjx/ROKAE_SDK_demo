@@ -66,7 +66,7 @@ int main()
     //==================输入参数
     std::string robot_ip = "192.168.2.160";
     std::string local_ip = "192.168.2.2";
-    const std::string input_q = "../data_in/q.txt";
+    const std::string input_q = "../data_in/exp_J1_2.txt";
 
     //
     std::error_code ec;

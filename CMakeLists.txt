@@ -34,15 +34,18 @@ find_library(XMATE_MODEL_LIB
     NO_DEFAULT_PATH
     REQUIRED
 )
-
+    
 message(STATUS "ROKAE_LIB = ${ROKAE_LIB}")
 message(STATUS "XMATE_MODEL_LIB = ${XMATE_MODEL_LIB}")
 message(STATUS "OROCOS_KDL_LIBRARIES = ${OROCOS_KDL_LIBRARIES}")
 
 # 生成可执行程序，目标名字为 ROKAE_rt_tau_out
 add_executable(ROKAE_rt_tau_out
-    src/ROKAE_rt_tau_out.cpp
-)
+    # src/ROKAE_UDP.cpp
+    src/ROKAE_BS_LX.cpp
+    # src/ROKAE_rt_tau_out.cpp
+    # src/ROKAE_in_1.cpp
+    )
 
 # 给这个目标添加头文件目录
 # 给目标 ROKAE_rt_tau_out 添加头文件搜索路径，也就是源文件存在

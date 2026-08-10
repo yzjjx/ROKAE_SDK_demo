@@ -1,35 +1,179 @@
-/*该代码用于实时模式输出力矩*/
 /* 该代码用于：
  * 1. 从 txt 读取关节轨迹
  * 2. 用实时模式下发关节位置
- * 3. 同步记录实时状态到 txt：
- *    - q_ref              : 下发的参考关节角
- *    - q_m                : 实际关节角
- *    - q_dot_m            : 关节速度
- *    - q_ddot_m           : 关节加速度
- *    - q_c                : 控制器指令关节角
- *    - tau_m              : 关节力矩
- *    - tau_filtered_m     : 滤波后关节力矩
- *    - motor_tau          : 电机转矩
- *    - motor_tau_filtered : 滤波后电机转矩
+ * 3. 标定关节力矩传感器
+ * 4. 同步记录 q_m、q_dot_m、tau_m 到 txt
+ * 5. 通过UDP把相同状态发送给MATLAB
  */
 
 #include <iostream>
 #include <thread>
 #include <chrono>
+#include <atomic>
 #include <cmath>
+#include <cerrno>
+#include <cstdint>
 #include <fstream>
 #include <sstream>
 #include <vector>
 #include <array>
+#include <queue>
+#include <mutex>
+#include <condition_variable>
 #include <functional>
 #include <stdexcept>
 #include <system_error>
 #include <filesystem>
 
+#include <arpa/inet.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
 #include "rokae/robot.h"
 
 using namespace rokae;
+
+constexpr char UDP_LOCAL_IP[] = "192.168.2.2";  // 本机连接MATLAB网段的网卡
+constexpr char MATLAB_IP[] = "192.168.2.180";
+constexpr std::uint16_t MATLAB_PORT = 5006;
+
+// 数据包结构（76 bytes）
+#pragma pack(push,1)
+struct Packet {
+    std::uint32_t        seq_id;
+    std::array<float,6>  q, dq, tau;   // 76 bytes
+};
+#pragma pack(pop)
+
+static_assert(sizeof(Packet) == 76, "UDP Packet大小必须为76字节");
+
+//====================== MATLAB UDP发送器 ======================
+// 实时回调只负责入队，网络发送放到独立线程，避免sendto阻塞控制回调。
+class MatlabUdpSender
+{
+public:
+    MatlabUdpSender(const char* local_ip, const char* dest_ip, std::uint16_t dest_port)
+    {
+        sock_ = ::socket(AF_INET, SOCK_DGRAM, 0);
+        if (sock_ < 0)
+        {
+            throw std::system_error(errno, std::generic_category(), "创建UDP socket失败");
+        }
+
+        sockaddr_in local{};
+        local.sin_family = AF_INET;
+        local.sin_port = htons(0);  // 由系统选择本地源端口
+        if (::inet_pton(AF_INET, local_ip, &local.sin_addr) != 1)
+        {
+            closeSocket();
+            throw std::runtime_error(std::string("无效的UDP本地IP: ") + local_ip);
+        }
+        if (::bind(sock_, reinterpret_cast<sockaddr*>(&local), sizeof(local)) < 0)
+        {
+            const int saved_errno = errno;
+            closeSocket();
+            throw std::system_error(saved_errno, std::generic_category(), "绑定UDP本地IP失败");
+        }
+
+        dest_.sin_family = AF_INET;
+        dest_.sin_port = htons(dest_port);
+        if (::inet_pton(AF_INET, dest_ip, &dest_.sin_addr) != 1)
+        {
+            closeSocket();
+            throw std::runtime_error(std::string("无效的MATLAB IP: ") + dest_ip);
+        }
+
+        worker_ = std::thread(&MatlabUdpSender::sendLoop, this);
+    }
+
+    MatlabUdpSender(const MatlabUdpSender&) = delete;
+    MatlabUdpSender& operator=(const MatlabUdpSender&) = delete;
+
+    ~MatlabUdpSender()
+    {
+        stop();
+    }
+
+    void enqueue(std::size_t sample_index,
+                 const std::array<double, 6>& q,
+                 const std::array<double, 6>& dq,
+                 const std::array<double, 6>& tau)
+    {
+        Packet packet{};
+        packet.seq_id = static_cast<std::uint32_t>(sample_index + 1);
+        for (std::size_t i = 0; i < 6; ++i)
+        {
+            packet.q[i] = static_cast<float>(q[i]);
+            packet.dq[i] = static_cast<float>(dq[i]);
+            packet.tau[i] = static_cast<float>(tau[i]);
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            queue_.push(packet);
+        }
+        cv_.notify_one();
+    }
+
+    void stop() noexcept
+    {
+        bool expected = true;
+        if (running_.compare_exchange_strong(expected, false))
+        {
+            cv_.notify_one();
+        }
+        if (worker_.joinable())
+        {
+            worker_.join();
+        }
+        closeSocket();
+    }
+
+private:
+    void sendLoop() noexcept
+    {
+        while (true)
+        {
+            Packet packet{};
+            {
+                std::unique_lock<std::mutex> lock(mutex_);
+                cv_.wait(lock, [&] { return !queue_.empty() || !running_; });
+                if (queue_.empty() && !running_)
+                {
+                    break;
+                }
+                packet = queue_.front();
+                queue_.pop();
+            }
+
+            const ssize_t sent = ::sendto(
+                sock_, &packet, sizeof(packet), 0,
+                reinterpret_cast<const sockaddr*>(&dest_), sizeof(dest_));
+            if (sent != static_cast<ssize_t>(sizeof(packet)) &&
+                errno != EAGAIN && errno != ENOBUFS)
+            {
+                std::cerr << "UDP发送失败: " << std::generic_category().message(errno) << std::endl;
+            }
+        }
+    }
+
+    void closeSocket() noexcept
+    {
+        if (sock_ >= 0)
+        {
+            ::close(sock_);
+            sock_ = -1;
+        }
+    }
+
+    int sock_ = -1;
+    sockaddr_in dest_{};
+    std::queue<Packet> queue_;
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    std::atomic<bool> running_{true};
+    std::thread worker_;
+};
 
 //====================== 读取轨迹 txt ======================
 std::vector<std::array<double, 6>> readJointTxt(const std::string& filename)
@@ -84,15 +228,10 @@ struct LogRow
     std::size_t index = 0;
     double time_s = 0.0;
 
-    std::array<double, 6> q_ref{};
     std::array<double, 6> q_m{};
     std::array<double, 6> q_dot_m{};
-    std::array<double, 6> q_ddot_m{};
-    std::array<double, 6> q_c{};
     std::array<double, 6> tau_m{};
-    std::array<double, 6> tau_filtered_m{};
-    std::array<double, 6> motor_tau{};
-    std::array<double, 6> motor_tau_filtered{};
+
 };
 
 //====================== 写 txt 文件 ======================
@@ -112,29 +251,17 @@ void writeLogTxt(const std::string& filename, const std::vector<LogRow>& logs)
 
     // 表头
     ofs << "index,time_s,"
-        << "qref1,qref2,qref3,qref4,qref5,qref6,"
         << "qm1,qm2,qm3,qm4,qm5,qm6,"
         << "qdotm1,qdotm2,qdotm3,qdotm4,qdotm5,qdotm6,"
-        << "qddotm1,qddotm2,qddotm3,qddotm4,qddotm5,qddotm6,"
-        << "qc1,qc2,qc3,qc4,qc5,qc6,"
-        << "tau_m1,tau_m2,tau_m3,tau_m4,tau_m5,tau_m6,"
-        << "tau_filtered_m1,tau_filtered_m2,tau_filtered_m3,tau_filtered_m4,tau_filtered_m5,tau_filtered_m6,"
-        << "motor_tau1,motor_tau2,motor_tau3,motor_tau4,motor_tau5,motor_tau6,"
-        << "motor_tau_filtered1,motor_tau_filtered2,motor_tau_filtered3,motor_tau_filtered4,motor_tau_filtered5,motor_tau_filtered6\n";
+        << "tau_m1,tau_m2,tau_m3,tau_m4,tau_m5,tau_m6\n";
 
     for (const auto& row : logs)
     {
         ofs << row.index << "," << row.time_s;
 
-        for (double v : row.q_ref) ofs << "," << v;
-        for (double v : row.q_m) ofs << "," << v;
+        for (double v : row.q_m) ofs << "," <<"]"<< v;
         for (double v : row.q_dot_m) ofs << "," << v;
-        for (double v : row.q_ddot_m) ofs << "," << v;
-        for (double v : row.q_c) ofs << "," << v;
         for (double v : row.tau_m) ofs << "," << v;
-        for (double v : row.tau_filtered_m) ofs << "," << v;
-        for (double v : row.motor_tau) ofs << "," << v;
-        for (double v : row.motor_tau_filtered) ofs << "," << v;
 
         ofs << "\n";
     }
@@ -160,13 +287,48 @@ void disableCollision(xMateRobot& robot)
     }
 }
 
+// //====================== 标定全部关节力矩传感器 ======================
+// void calibrateJointTorqueSensors(xMateRobot& robot)
+// {
+//     error_code ec;
+
+//     // SDK要求标定前设置正确的末端负载。这里沿用当前工具工件组；
+//     // 运行前必须确认其质量、质心和惯量与实际末端负载一致。
+//     const Toolset active_toolset = robot.toolset(ec);
+//     if (ec)
+//     {
+//         throw std::system_error(ec, "读取当前工具负载失败");
+//     }
+//     robot.setToolset(active_toolset, ec);
+//     if (ec)
+//     {
+//         throw std::system_error(ec, "设置工具负载失败");
+//     }
+
+//     std::cout << "标定使用的工具负载: mass=" << active_toolset.load.mass
+//               << " kg, cog=[" << active_toolset.load.cog[0] << ", "
+//               << active_toolset.load.cog[1] << ", "
+//               << active_toolset.load.cog[2] << "] m" << std::endl;
+
+//     // all_axes=true时axis_index不生效；传0而不是越界的6，避免误导。
+//     robot.calibrateForceSensor(true, 0, ec);
+//     if (ec)
+//     {
+//         throw std::system_error(ec, "关节力矩传感器标定指令失败");
+//     }
+
+//     // SDK说明该接口异步返回，标定约需100ms。
+//     std::this_thread::sleep_for(std::chrono::milliseconds(200));
+//     std::cout << "全部关节力矩传感器标定完成" << std::endl;
+// }
+
 //====================== 主函数 ======================
 int main()
 {
     //================== 输入参数 ==================
     std::string robot_ip = "192.168.2.160";
     std::string local_ip = "192.168.2.2";
-    const std::string input_q    = "../data_in/exp_J1_2.txt";
+    const std::string input_q    = "../data_in/exp_J1_3.txt";
     const std::string output_txt = "../data_out/rt_torque_log5.txt";
 
     std::error_code ec;
@@ -185,6 +347,13 @@ int main()
         // 2) 连接机器人
         SDU_SR4.connectToRobot(robot_ip, local_ip);
         std::cout << "机器人连接成功" << std::endl;
+
+        // // 标定时机器人应保持静止、不受外力。
+        // calibrateJointTorqueSensors(SDU_SR4);
+
+        // 独立线程把实时状态发往MATLAB。
+        MatlabUdpSender udp_sender(UDP_LOCAL_IP, MATLAB_IP, MATLAB_PORT);
+        std::cout << "UDP数据将发送到 " << MATLAB_IP << ":" << MATLAB_PORT << std::endl;
 
         // 关闭碰撞检测
         disableCollision(SDU_SR4);
@@ -236,12 +405,7 @@ int main()
             {
                 rokae::RtSupportedFields::jointPos_m,
                 rokae::RtSupportedFields::jointVel_m,
-                rokae::RtSupportedFields::jointAcc_m,
-                rokae::RtSupportedFields::jointPos_c,
                 rokae::RtSupportedFields::tau_m,
-                rokae::RtSupportedFields::tauFiltered_m,
-                rokae::RtSupportedFields::motorTau,
-                rokae::RtSupportedFields::motorTauFiltered
             }
         );
 
@@ -287,20 +451,15 @@ int main()
             LogRow row;
             row.index  = index;
             row.time_s = static_cast<double>(index) * 0.001;  // 按1ms周期记录
-            row.q_ref  = q_ref;
 
             // 这些 getStateData 在 setControlLoop(..., true) 后，
             // 每次回调前会自动刷新到最新状态
             (void)SDU_SR4.getStateData(rokae::RtSupportedFields::jointPos_m, row.q_m);
             (void)SDU_SR4.getStateData(rokae::RtSupportedFields::jointVel_m, row.q_dot_m);
-            (void)SDU_SR4.getStateData(rokae::RtSupportedFields::jointAcc_m, row.q_ddot_m);
-            (void)SDU_SR4.getStateData(rokae::RtSupportedFields::jointPos_c, row.q_c);
             (void)SDU_SR4.getStateData(rokae::RtSupportedFields::tau_m, row.tau_m);
-            (void)SDU_SR4.getStateData(rokae::RtSupportedFields::tauFiltered_m, row.tau_filtered_m);
-            (void)SDU_SR4.getStateData(rokae::RtSupportedFields::motorTau, row.motor_tau);
-            (void)SDU_SR4.getStateData(rokae::RtSupportedFields::motorTauFiltered, row.motor_tau_filtered);
 
             logs.push_back(row);
+            udp_sender.enqueue(row.index, row.q_m, row.q_dot_m, row.tau_m);
 
             ++index;
 
@@ -324,6 +483,9 @@ int main()
         rtCon->startLoop(true);
 
         std::cout << "轨迹执行结束" << std::endl;
+
+        // 等待队列中的数据发送完毕后关闭socket。
+        udp_sender.stop();
 
         // 16) 停止接收实时状态
         SDU_SR4.stopReceiveRobotState();
